@@ -231,9 +231,3 @@ main().catch(error => {
   console.error("FATAL:", error);
   process.exitCode = 1;
 });
-
-
-main().catch(error => {
-  console.error("FATAL:", error);
-  process.exitCode = 1;
-});
