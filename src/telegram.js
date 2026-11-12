@@ -2,40 +2,44 @@
 import axios from "axios";
 import { config } from "./config.js";
 
-// Format số
+// Định dạng số
 const fmt = (value, digits = 2) =>
   Number(value).toLocaleString("en-US", {
     maximumFractionDigits: digits
   });
 
 export async function sendToTelegram(wall) {
-  // Phân biệt BUY WALL và SELL WALL
+  // Trạng thái Wall
+  const repeat = Number(wall.repeatCount) || 1;
+
+  const status =
+    repeat > 1
+      ? `🔁 REPEAT ×${repeat}`
+      : "🆕 NEW WALL";
+
+  // BUY / SELL WALL
   const side =
     wall.side === "BUY"
       ? "🟢 BUY WALL"
       : "🔴 SELL WALL";
 
-  // Trạng thái Wall: NEW hoặc REPEAT
-  const repeatCount = Number(wall.repeatCount) || 1;
+  // Giá Wall để hiển thị và sao chép
+  const priceText = String(wall.priceText ?? wall.price);
 
-  const coinGlassUrl =
-  `https://www.coinglass.com/tv/vi/Binance_${wall.symbol}`;
+  // Link CoinGlass Binance
+  const chart =
+    `https://www.coinglass.com/tv/vi/Binance_${wall.symbol}`;
 
-  const wallStatus =
-    repeatCount > 1
-      ? `🔁 REPEAT ×${repeatCount}`
-      : "🆕 NEW WALL";
-
-  // Nội dung tin nhắn Telegram
+  // Nội dung Telegram
   const message = [
     "🚨 BINANCE FUTURES WALL ALERT",
     "",
     `🪙 Coin: ${wall.symbol}`,
     side,
-    wallStatus,
+    status,
     "",
     "💰 WALL INFORMATION",
-    `💰 Giá Wall: <code>${wall.price}</code>`,
+    `💰 Giá Wall: <code>${priceText}</code>`,
     `📦 Khối lượng: ${fmt(wall.qty, 6)}`,
     `💵 Giá trị: ${fmt(wall.usdt)} USDT`,
     `📊 Gấp trung bình: ${fmt(wall.ratio)} lần`,
@@ -45,10 +49,32 @@ export async function sendToTelegram(wall) {
     `📍 Khoảng cách giá: ${
       wall.distancePercent >= 0 ? "+" : ""
     }${fmt(wall.distancePercent)}%`,
+    ...(wall.depth != null
+      ? [`📊 Depth: ${wall.depth}`]
+      : []),
     "",
-    `🔗 https://www.coinglass.com/tv/vi/Binance_${wall.symbol}`,
     "⚠️ Snapshot lệnh chờ, không phải giao dịch đã khớp."
   ].join("\n");
+
+  // Nút Telegram
+  
+const replyMarkup = {
+  inline_keyboard: [
+    [
+      {
+        text: "📋 Copy giá Wall",
+        copy_text: {
+          text: priceText
+        }
+      },
+      {
+        text: "📈 Xem biểu đồ CoinGlass",
+        url: chart
+      }
+    ]
+  ]
+};
+
 
   // Nếu chưa cấu hình Telegram thì in ra console
   if (
@@ -63,21 +89,30 @@ export async function sendToTelegram(wall) {
   const url =
     `https://api.telegram.org/bot${config.telegramToken}/sendMessage`;
 
-  // Gửi tin nhắns
-  const { data } = await axios.post(
-    url,
-    {
-      chat_id: config.telegramChatId,
-      text: message,
-      parse_mode: "HTML"
-    },
-    {
-      timeout: 15000
-    }
-  );
+  try {
+    const { data } = await axios.post(
+      url,
+      {
+        chat_id: config.telegramChatId,
+        text: message,
+        parse_mode: "HTML",
+        reply_markup: replyMarkup
+      },
+      {
+        timeout: 15000
+      }
+    );
 
-  // Kiểm tra kết quả gửi
-  if (!data.ok) {
-    throw new Error("Telegram send failed");
+    if (!data.ok) {
+      throw new Error(
+        data.description || "Telegram send failed"
+      );
+    }
+  } catch (error) {
+    const detail =
+      error.response?.data?.description ||
+      error.message;
+
+    throw new Error(`Telegram error: ${detail}`);
   }
 }
