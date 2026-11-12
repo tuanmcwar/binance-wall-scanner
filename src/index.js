@@ -178,38 +178,42 @@ alerts++;
   );
 }
 
+
 async function main() {
-  console.log(
-    "🚀 BINANCE FUTURES WALL SCANNER V1"
-  );
+  console.log("🚀 BINANCE FUTURES WALL SCANNER V1");
 
-  console.log(
-    `📊 Depth: ${config.depthLimit}`
-  );
-
-  console.log(
-    `💵 Wall >= ${config.minUSDT} USDT`
-  );
-
-  console.log(
-    `📈 Ratio >= ${config.multiplier}x`
-  );
-
-  console.log(
-    `📍 Range: ±${config.rangePercent}%`
-  );
-
-  console.log(
-    `⏱️ Delay: ${config.requestDelay}ms`
-  );
+  console.log(`📊 Depth: ${config.depthLimit}`);
+  console.log(`💵 Wall >= ${config.minUSDT} USDT`);
+  console.log(`📈 Ratio >= ${config.multiplier}x`);
+  console.log(`📍 Range: ±${config.rangePercent}%`);
+  console.log(`⏱️ Delay: ${config.requestDelay}ms`);
 
   while (running) {
+    const now = new Date();
+
+    // Tính thời điểm đầu giờ tiếp theo
+    const nextScan = new Date(now);
+    nextScan.setHours(now.getHours() + 1, 0, 0, 0);
+
+    const waitMs = nextScan.getTime() - Date.now();
+
+    console.log(
+      `⏳ Chờ đến ${nextScan.toLocaleString("vi-VN")} để quét`
+    );
+
+    // Nghỉ đến đầu giờ tiếp theo
+    await sleep(waitMs);
+
+    if (!running) break;
+
+    console.log(
+      `🔍 Bắt đầu quét lúc ${new Date().toLocaleString("vi-VN")}`
+    );
+
     try {
       await scanMarket();
     } catch (error) {
-      console.error(
-        `❌ Scan error: ${error.message}`
-      );
+      console.error(`❌ Scan error: ${error.message}`);
 
       if (error.message.includes("HTTP 451")) {
         console.error(
@@ -218,18 +222,16 @@ async function main() {
         break;
       }
     }
-
-    if (running) {
-      console.log(
-        `⏳ Nghỉ ${config.scanInterval / 1000} giây`
-      );
-
-      await sleep(config.scanInterval);
-    }
   }
 
   console.log("Scanner stopped.");
 }
+
+main().catch(error => {
+  console.error("FATAL:", error);
+  process.exitCode = 1;
+});
+
 
 main().catch(error => {
   console.error("FATAL:", error);
