@@ -1,143 +1,89 @@
 
 import { config } from "./config.js";
 
-function parseLevels(rawLevels) {
-  if (!Array.isArray(rawLevels)) {
-    return [];
-  }
+function parseLevels(levels) {
+  return levels
+    .map(([price, quantity]) => {
+      const p = Number(price);
+      const q = Number(quantity);
 
-  return rawLevels
-    .map(([price, quantity]) => ({
-      price: Number(price),
-      qty: Number(quantity),
-      usdt: Number(price) * Number(quantity)
-    }))
+      return {
+        price: p,
+        priceText: String(price),
+        quantity: q,
+        value: p * q
+      };
+    })
     .filter(level =>
       Number.isFinite(level.price) &&
-      Number.isFinite(level.qty) &&
-      Number.isFinite(level.usdt) &&
+      Number.isFinite(level.quantity) &&
       level.price > 0 &&
-      level.qty > 0 &&
-      level.usdt > 0
+      level.quantity > 0
     );
 }
 
-function detectWalls(levels, side, midPrice) {
-  const range = config.rangePercent / 100;
+export function scanWalls(symbol, depth) {
+  const bids = parseLevels(depth.bids || []);
+  const asks = parseLevels(depth.asks || []);
+
+  if (!bids.length || !asks.length) {
+    throw new Error(`Empty order book: ${symbol}`);
+  }
+
+  const bestBid = bids[0].price;
+  const bestAsk = asks[0].price;
+
+  const midPrice = (bestBid + bestAsk) / 2;
+  const range = config.priceRangePercent / 100;
 
   const minPrice = midPrice * (1 - range);
   const maxPrice = midPrice * (1 + range);
 
-  const nearby = levels.filter(level =>
-    level.price >= minPrice &&
-    level.price <= maxPrice
-  );
+  const results = [];
 
-  if (nearby.length < config.minLevels) {
-    return [];
-  }
+  for (const [side, levels] of [
+    ["BUY", bids],
+    ["SELL", asks]
+  ]) {
+    const nearby = levels.filter(level =>
+      level.price >= minPrice &&
+      level.price <= maxPrice
+    );
 
-  const totalUSDT = nearby.reduce(
-    (sum, level) => sum + level.usdt,
-    0
-  );
+    if (!nearby.length) continue;
 
-  const walls = [];
+    const total = nearby.reduce(
+      (sum, level) => sum + level.value,
+      0
+    );
 
-  for (const level of nearby) {
-    if (level.usdt < config.minUSDT) {
-      continue;
-    }
+    const average = total / nearby.length;
 
-    const remainingCount = nearby.length - 1;
+    if (average <= 0) continue;
 
-    if (remainingCount <= 0) {
-      continue;
-    }
+    for (const level of nearby) {
+      const ratio = level.value / average;
 
-    // Loại trừ chính Wall đang xét
-    // khỏi giá trị trung bình.
-    const remainingUSDT =
-      totalUSDT - level.usdt;
-
-    if (remainingUSDT <= 0) {
-      continue;
-    }
-
-    const averageUSDT =
-      remainingUSDT / remainingCount;
-
-    if (averageUSDT <= 0) {
-      continue;
-    }
-
-    const ratio =
-      level.usdt / averageUSDT;
-
-    if (ratio >= config.multiplier) {
-      walls.push({
-        side,
-        price: level.price,
-        qty: level.qty,
-        usdt: level.usdt,
-        ratio,
-        averageUSDT,
-        distancePercent:
-          ((level.price - midPrice) / midPrice) *
-          100
-      });
+      if (
+        level.value >= config.minWallUSDT &&
+        ratio >= config.minWallRatio
+      ) {
+        results.push({
+  symbol,
+  side,
+  price: level.price,
+  priceText: level.priceText,
+  quantity: level.quantity,
+  value: level.value,
+  ratio,
+  average,
+  distancePercent:
+    ((level.price - midPrice) / midPrice) * 100,
+  midPrice
+});
+      }
     }
   }
 
-  return walls;
-}
-
-export function scanWalls(symbol, snapshot) {
-  if (
-    !snapshot ||
-    !Array.isArray(snapshot.bids) ||
-    !Array.isArray(snapshot.asks)
-  ) {
-    return [];
-  }
-
-  const bids = parseLevels(snapshot.bids);
-  const asks = parseLevels(snapshot.asks);
-
-  if (!bids.length || !asks.length) {
-    return [];
-  }
-
-  const bestBid = Math.max(
-    ...bids.map(level => level.price)
-  );
-
-  const bestAsk = Math.min(
-    ...asks.map(level => level.price)
-  );
-
-  if (
-    !Number.isFinite(bestBid) ||
-    !Number.isFinite(bestAsk) ||
-    bestBid >= bestAsk
-  ) {
-    return [];
-  }
-
-  const midPrice =
-    (bestBid + bestAsk) / 2;
-
-  return [
-    ...detectWalls(bids, "BUY", midPrice),
-    ...detectWalls(asks, "SELL", midPrice)
-  ]
-    .map(wall => ({
-      ...wall,
-      symbol,
-      bestBid,
-      bestAsk,
-      midPrice,
-      rangePercent: config.rangePercent
-    }))
-    .sort((a, b) => b.ratio - a.ratio);
+  return results.sort((a, b) => b.value - a.value);
 }

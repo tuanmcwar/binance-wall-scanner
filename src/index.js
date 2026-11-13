@@ -1,233 +1,228 @@
 
 import { config } from "./config.js";
+
 import {
   getSymbols,
-  getDepth
+  getDepth,
+  sleep
 } from "./binance.js";
+
 import { scanWalls } from "./wallScanner.js";
-import { sendToTelegram } from "./telegram.js";
 
-const sleep = ms =>
-  new Promise(resolve => setTimeout(resolve, ms));
+import {
+  loadHistory,
+  getHourKey,
+  formatHour,
+  wasSymbolProcessed,
+  processSymbolWalls,
+  getHistoryStats
+} from "./wallHistory.js";
 
-const alertHistory = new Map();
+import {
+  flushNotifications
+} from "./telegram.js";
 
-const wallRepeatHistory = new Map();
-
-function getWallRepeatInfo(wall) {
-  const key = `${wall.symbol}:${wall.side}:${wall.price}`;
-
-  const count = (wallRepeatHistory.get(key) || 0) + 1;
-
-  return { key, count };
-}
+const HOUR_MS = 60 * 60 * 1000;
+// const HOUR_MS = 5 * 60 * 1000;
 
 let running = true;
+let scanning = false;
 
 process.on("SIGINT", () => {
+  console.log("[SYSTEM] SIGINT received");
   running = false;
 });
 
 process.on("SIGTERM", () => {
+  console.log("[SYSTEM] SIGTERM received");
   running = false;
 });
 
-function getAlertKey(wall) {
-  return [
-    wall.symbol,
-    wall.side,
-    wall.price
-  ].join(":");
-}
-
-function canAlert(wall) {
-  const key = getAlertKey(wall);
-  const lastAlert = alertHistory.get(key);
-
-  if (lastAlert === undefined) {
-    return true;
-  }
-
-  return (
-    Date.now() - lastAlert >= config.cooldown
-  );
-}
-
-function markAlerted(wall) {
-  alertHistory.set(
-    getAlertKey(wall),
-    Date.now()
-  );
-}
-
-function cleanAlertHistory() {
-  const now = Date.now();
-
-  for (const [key, timestamp] of alertHistory) {
-    if (now - timestamp >= config.cooldown) {
-      alertHistory.delete(key);
+function log(message) {
+  const time = new Date().toLocaleString(
+    "vi-VN",
+    {
+      timeZone: "Asia/Ho_Chi_Minh",
+      hour12: false
     }
-  }
-}
-
-async function scanMarket() {
-  const symbols = await getSymbols();
-
-  console.log(
-    `\n🔍 Bắt đầu quét ${symbols.length} coin`
   );
 
-  let scanned = 0;
-  let alerts = 0;
-  let errors = 0;
+  console.log(`[${time}] ${message}`);
+}
 
-  for (const symbol of symbols) {
-    if (!running) break;
+async function scanMarket(hourKey) {
+  if (scanning) return;
 
-    try {
-      const snapshot = await getDepth(symbol);
+  scanning = true;
 
-      const walls = scanWalls(
-        symbol,
-        snapshot
-      );
+  let success = 0;
+  let failed = 0;
+  let skipped = 0;
 
-      for (const wall of walls) {
-        if (!canAlert(wall)) {
-          continue;
+  const eventCounts = {
+    NEW: 0,
+    REPEAT: 0,
+    NO_REPEAT_1: 0,
+    NO_REPEAT_2: 0
+  };
+
+  try {
+    log("━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    log(`🔍 START SCAN: ${formatHour(hourKey)}`);
+
+    const symbols = await getSymbols();
+
+    log(`📊 Total symbols: ${symbols.length}`);
+
+    for (let i = 0; i < symbols.length; i++) {
+      if (!running) break;
+
+      const symbol = symbols[i];
+
+      if (wasSymbolProcessed(symbol, hourKey)) {
+        skipped++;
+        continue;
+      }
+
+      try {
+        const depth = await getDepth(symbol);
+
+        const walls = scanWalls(symbol, depth);
+
+        // Chỉ cập nhật vòng đời khi:
+        // 1. API thành công.
+        // 2. Order Book hợp lệ.
+        // 3. scanWalls không phát sinh lỗi.
+        const events = processSymbolWalls(
+          symbol,
+          walls,
+          hourKey
+        );
+
+        success++;
+
+        for (const event of events) {
+          eventCounts[event.type]++;
+
+          log(
+            `[${event.type}] ${event.key}`
+          );
         }
 
-        // Gửi ngay, không kiểm tra persistence.
-        const repeatInfo = getWallRepeatInfo(wall);
+        if (events.length) {
+          await flushNotifications();
+        }
 
-await sendToTelegram({
-  ...wall,
-  repeatCount: repeatInfo.count
-});
+      } catch (error) {
+        failed++;
 
-// Chỉ tăng số lần sau khi gửi Telegram thành công.
-wallRepeatHistory.set(
-  repeatInfo.key,
-  repeatInfo.count
-);
-
-markAlerted(wall);
-alerts++;
-
-        console.log(
-          `🚨 ${symbol} ${wall.side} | ` +
-          `${wall.ratio.toFixed(2)}x | ` +
-          `${wall.usdt.toFixed(2)} USDT`
+        log(
+          `❌ ${symbol}: ` +
+          (error.response?.data?.msg ||
+           error.message)
         );
-      }
-    } catch (error) {
-      errors++;
 
-      const status = error.response?.status;
-
-      console.error(
-        `❌ ${symbol}: ${error.message}`
-      );
-
-      if (status === 451) {
-        throw new Error(
-          "HTTP 451: Binance chặn khu vực IP server"
-        );
+        // API lỗi: không tăng NO REPEAT.
       }
 
-      if (status === 429 || status === 418) {
-        const retryAfter = Number(
-          error.response?.headers?.["retry-after"]
-        );
-
-        const waitMs =
-          Number.isFinite(retryAfter) &&
-          retryAfter > 0
-            ? retryAfter * 1000
-            : status === 418
-              ? 120000
-              : 65000;
-
-        console.log(
-          `⏳ Rate limit: chờ ${waitMs}ms`
-        );
-
-        await sleep(waitMs);
+      if (i < symbols.length - 1 && running) {
+        await sleep(config.scanDelayMs);
       }
     }
 
-    scanned++;
+    await flushNotifications();
 
-    if (scanned % 50 === 0) {
-      console.log(
-        `📊 ${scanned}/${symbols.length} | ` +
-        `Alerts: ${alerts} | Errors: ${errors}`
-      );
-    }
+    const stats = getHistoryStats();
 
-    if (running) {
-      await sleep(config.requestDelay);
-    }
-  }
+    log("━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    log("📊 SCAN SUMMARY");
+    log(`✅ Success: ${success}`);
+    log(`❌ Failed: ${failed}`);
+    log(`⏭ Skipped: ${skipped}`);
+    log(`🆕 NEW: ${eventCounts.NEW}`);
+    log(`🔁 REPEAT: ${eventCounts.REPEAT}`);
+    log(`⚠️ NO REPEAT 1: ${eventCounts.NO_REPEAT_1}`);
+    log(`🗑 NO REPEAT 2: ${eventCounts.NO_REPEAT_2}`);
+    log(`📚 Active walls: ${stats.activeWalls}`);
+    log(
+      `📨 Pending notifications: ` +
+      stats.pendingNotifications
+    );
+    log("━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-  cleanAlertHistory();
-
-  console.log(
-    `✅ Hoàn thành: ${scanned}/${symbols.length} | ` +
-    `Alerts: ${alerts} | Errors: ${errors}`
-  );
-}
-
-
-async function main() {
-  console.log("🚀 BINANCE FUTURES WALL SCANNER V1");
-
-  console.log(`📊 Depth: ${config.depthLimit}`);
-  console.log(`💵 Wall >= ${config.minUSDT} USDT`);
-  console.log(`📈 Ratio >= ${config.multiplier}x`);
-  console.log(`📍 Range: ±${config.rangePercent}%`);
-  console.log(`⏱️ Delay: ${config.requestDelay}ms`);
-
-  while (running) {
-    const now = new Date();
-
-    // Tính thời điểm đầu giờ tiếp theo
-    const nextScan = new Date(now);
-    nextScan.setHours(now.getHours() + 1, 0, 0, 0);
-
-    const waitMs = nextScan.getTime() - Date.now();
-
-    console.log(
-      `⏳ Chờ đến ${nextScan.toLocaleString("vi-VN")} để quét`
+  } catch (error) {
+    log(
+      `[SCAN ERROR] ${error.message}`
     );
 
-    // Nghỉ đến đầu giờ tiếp theo
-    await sleep(waitMs);
+  } finally {
+    scanning = false;
+  }
+}
+
+async function waitForNextHour() {
+  const now = Date.now();
+
+  const nextHour =
+    (Math.floor(now / HOUR_MS) + 1) * HOUR_MS;
+
+  log(
+    `⏰ Next scan: ${new Date(nextHour)
+      .toLocaleString("vi-VN", {
+        timeZone: "Asia/Ho_Chi_Minh",
+        hour12: false
+      })}`
+  );
+
+  while (running && Date.now() < nextHour) {
+    const remaining = nextHour - Date.now();
+
+    await sleep(
+      Math.min(remaining, 10000)
+    );
+  }
+}
+
+async function main() {
+  loadHistory();
+
+  log("🚀 BINANCE WALL SCANNER STARTED");
+  log("⏱ Scan interval: 1H");
+  log("🌏 Timezone: Asia/Ho_Chi_Minh");
+  log(`📚 Depth limit: ${config.depthLimit}`);
+  log(`💰 Min Wall: ${config.minWallUSDT} USDT`);
+  log(`📊 Min Ratio: ${config.minWallRatio}x`);
+  log(
+    `📏 Price Range: ±${config.priceRangePercent}%`
+  );
+
+  const stats = getHistoryStats();
+
+  log(`💾 History file: ${stats.filePath}`);
+  log(`📚 Active walls: ${stats.activeWalls}`);
+
+  // Thử gửi thông báo tồn đọng sau restart.
+  await flushNotifications();
+
+  // Chờ tới đầu giờ tiếp theo.
+  await waitForNextHour();
+
+  while (running) {
+    const hourKey = getHourKey();
+
+    await scanMarket(hourKey);
 
     if (!running) break;
 
-    console.log(
-      `🔍 Bắt đầu quét lúc ${new Date().toLocaleString("vi-VN")}`
-    );
+    await flushNotifications();
 
-    try {
-      await scanMarket();
-    } catch (error) {
-      console.error(`❌ Scan error: ${error.message}`);
-
-      if (error.message.includes("HTTP 451")) {
-        console.error(
-          "Không thể tiếp tục quét với IP hiện tại."
-        );
-        break;
-      }
-    }
+    await waitForNextHour();
   }
 
-  console.log("Scanner stopped.");
+  log("🛑 WALL SCANNER STOPPED");
 }
 
 main().catch(error => {
-  console.error("FATAL:", error);
+  console.error("[FATAL]", error);
   process.exitCode = 1;
 });

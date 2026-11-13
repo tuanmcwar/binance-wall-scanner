@@ -2,117 +2,174 @@
 import axios from "axios";
 import { config } from "./config.js";
 
-// Định dạng số
-const fmt = (value, digits = 2) =>
-  Number(value).toLocaleString("en-US", {
+import {
+  formatHour,
+  getPendingNotifications,
+  markNotificationSent
+} from "./wallHistory.js";
+
+const telegram = axios.create({
+  baseURL:
+    `https://api.telegram.org/bot${config.telegramToken}`,
+  timeout: 15000
+});
+
+function number(value, digits = 2) {
+  if (!Number.isFinite(Number(value))) {
+    return "N/A";
+  }
+
+  return new Intl.NumberFormat("en-US", {
     maximumFractionDigits: digits
-  });
+  }).format(Number(value));
+}
 
-export async function sendToTelegram(wall) {
-  // Trạng thái Wall
-  const repeat = Number(wall.repeatCount) || 1;
+function formatPrice(value) {
+  return String(value);
+}
 
-  const status =
-    repeat > 1
-      ? `🔁 REPEAT ×${repeat}`
-      : "🆕 NEW WALL";
-
-  // BUY / SELL WALL
+function formatNotification(n) {
   const side =
-    wall.side === "BUY"
+    n.side === "BUY"
       ? "🟢 BUY WALL"
       : "🔴 SELL WALL";
 
-  // Giá Wall để hiển thị và sao chép
-  const priceText = String(wall.priceText ?? wall.price);
+  let status;
 
-  // Link CoinGlass Binance
-  const chart =
-    `https://www.coinglass.com/tv/vi/Binance_${wall.symbol}`;
+  switch (n.type) {
+    case "NEW":
+      status = "🆕 NEW WALL";
+      break;
 
-  // Nội dung Telegram
-  const message = [
+    case "REPEAT":
+      status = `🔁 REPEAT ×${n.repeatCount}`;
+      break;
+
+    case "NO_REPEAT_1":
+      status = "⚠️ NO REPEAT 1";
+      break;
+
+    case "NO_REPEAT_2":
+      status = "❌ NO REPEAT 2";
+      break;
+
+    default:
+      status = "📊 WALL UPDATE";
+  }
+
+  const lines = [
     "🚨 BINANCE FUTURES WALL ALERT",
     "",
-    `🪙 Coin: ${wall.symbol}`,
+    `🌑 Coin: ${n.symbol}`,
     side,
     status,
     "",
     "💰 WALL INFORMATION",
-    `💰 Giá Wall: <code>${priceText}</code>`,
-    `📦 Khối lượng: ${fmt(wall.qty, 6)}`,
-    `💵 Giá trị: ${fmt(wall.usdt)} USDT`,
-    `📊 Gấp trung bình: ${fmt(wall.ratio)} lần`,
-    `📉 Trung bình/mức: ${fmt(wall.averageUSDT)} USDT`,
+    `💰 Giá Wall: ${formatPrice(n.price)}`,
+    `📦 Khối lượng: ${number(n.quantity, 2)}`,
+    `💵 Giá trị: ${number(n.value)} USDT`,
+    `📊 Gấp trung bình: ${number(n.ratio)} lần`,
+    `📉 Trung bình/mức: ${number(n.average)} USDT`,
     "",
     "📍 PRICE POSITION",
     `📍 Khoảng cách giá: ${
-      wall.distancePercent >= 0 ? "+" : ""
-    }${fmt(wall.distancePercent)}%`,
-    ...(wall.depth != null
-      ? [`📊 Depth: ${wall.depth}`]
-      : []),
+      Number.isFinite(Number(n.distancePercent))
+        ? number(n.distancePercent) + "%"
+        : "N/A"
+    }`,
     "",
-    "⚠️ Snapshot lệnh chờ, không phải giao dịch đã khớp."
-  ].join("\n");
+    `🕒 Giờ quét: ${formatHour(n.hourKey)}`
+  ];
 
-  // Nút Telegram
-  
-const replyMarkup = {
-  inline_keyboard: [
-    [
-      {
-        text: "📋 Copy giá Wall",
-        copy_text: {
-          text: priceText
-        }
-      },
-      {
-        text: "📈 Xem biểu đồ CoinGlass",
-        url: chart
-      }
-    ]
-  ]
-};
-
-
-  // Nếu chưa cấu hình Telegram thì in ra console
-  if (
-    !config.telegramToken ||
-    !config.telegramChatId
-  ) {
-    console.log(message);
-    return;
-  }
-
-  // Telegram Bot API
-  const url =
-    `https://api.telegram.org/bot${config.telegramToken}/sendMessage`;
-
-  try {
-    const { data } = await axios.post(
-      url,
-      {
-        chat_id: config.telegramChatId,
-        text: message,
-        parse_mode: "HTML",
-        reply_markup: replyMarkup
-      },
-      {
-        timeout: 15000
-      }
+  if (n.type === "NO_REPEAT_1") {
+    lines.push("");
+    lines.push(
+      "⚠️ Wall không còn đạt điều kiện.",
+      "⏳ Tiếp tục kiểm tra lần quét sau."
     );
-
-    if (!data.ok) {
-      throw new Error(
-        data.description || "Telegram send failed"
-      );
-    }
-  } catch (error) {
-    const detail =
-      error.response?.data?.description ||
-      error.message;
-
-    throw new Error(`Telegram error: ${detail}`);
   }
+
+  if (n.type === "NO_REPEAT_2") {
+    lines.push("");
+    lines.push(
+      "🗑 Wall đã bị xóa khỏi danh sách theo dõi."
+    );
+  }
+
+  lines.push("");
+  lines.push(
+    "⚠️ Snapshot lệnh chờ, không phải giao dịch đã khớp."
+  );
+
+  return lines.join("\n");
+}
+
+function getKeyboard(notification) {
+  const symbol = notification.symbol;
+
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: "📋 Copy giá Wall",
+          copy_text: {
+            text: String(notification.price)
+          }
+        },
+        {
+          text: "📈 Xem biểu đồ CoinGlass",
+          url: "https://www.coinglass.com/"
+        }
+      ]
+    ]
+  };
+}
+
+export async function sendTelegram(
+  text,
+  replyMarkup = null
+) {
+  const payload = {
+    chat_id: config.telegramChatId,
+    text
+  };
+
+  if (replyMarkup) {
+    payload.reply_markup = replyMarkup;
+  }
+
+  await telegram.post("/sendMessage", payload);
+}
+
+export async function flushNotifications() {
+  const pending = getPendingNotifications();
+
+  let sent = 0;
+
+  for (const notification of pending) {
+    try {
+      await sendTelegram(
+        formatNotification(notification),
+        getKeyboard(notification)
+      );
+
+      markNotificationSent(notification.id);
+      sent++;
+
+      await new Promise(resolve =>
+        setTimeout(resolve, 100)
+      );
+
+    } catch (error) {
+      console.error(
+        "[TELEGRAM] Send failed:",
+        error.response?.data?.description ||
+        error.message
+      );
+
+      break;
+    }
+  }
+
+  return sent;
 }
