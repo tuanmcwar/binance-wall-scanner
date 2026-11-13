@@ -38,7 +38,7 @@ export async function sendToTelegram(wall) {
     side,
     status,
     "",
-    "💰 WALL INFORMATION",
+    "💰 WALL-INFORMATION",
     `💰 Giá Wall: <code>${priceText}</code>`,
     `📦 Khối lượng: ${fmt(wall.qty, 6)}`,
     `💵 Giá trị: ${fmt(wall.usdt)} USDT`,
